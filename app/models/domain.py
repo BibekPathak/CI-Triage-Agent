@@ -161,7 +161,9 @@ class VerificationReport(BaseModel):
     results: list[TestResult] = Field(default_factory=list)
 
     def status_for(self, level: VerificationLevel) -> CheckStatus:
-        for r in self.results:
+        # Most recent result for a level (so post-patch verification wins over
+        # the earlier reproduce-only run of the same layer).
+        for r in reversed(self.results):
             if r.level == level:
                 return r.status
         return CheckStatus.SKIPPED

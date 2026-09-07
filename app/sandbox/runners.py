@@ -11,10 +11,14 @@ so policy enforcement is uniform regardless of backend.
 
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
+import tempfile
 import time
+import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 from app.agent.policies import DEFAULT_POLICY, CommandDeniedError, CommandPolicy
@@ -62,6 +66,7 @@ class LocalCommandRunner:
 
     def __init__(self, policy: CommandPolicy = DEFAULT_POLICY) -> None:
         self.policy = policy
+        self._pycache_base = Path(tempfile.mkdtemp(prefix="cta-pyc-"))
 
     def run(
         self,
@@ -72,13 +77,17 @@ class LocalCommandRunner:
     ) -> CommandOutput:
         start = time.monotonic()
         try:
-            self.policy.validate_command(command, action_class=CommandPolicy().action_class)
+            self.policy.validate_command(command, action_class=self.policy.action_class)
         except CommandDeniedError as exc:
             return CommandOutput(
                 exit_code=-1, stdout="", stderr="", duration_ms=0, denied=True, error=str(exc)
             )
         shell_timeout = timeout if timeout is not None else 120.0
         args = shlex.split(command)
+        # Fresh bytecache per run so a just-patched source file is never masked
+        # by a stale .pyc during reproduction/verification (determinism).
+        env = dict(os.environ)
+        env["PYTHONPYCACHEPREFIX"] = str(self._pycache_base / uuid.uuid4().hex)
         try:
             proc = subprocess.run(
                 args,
@@ -86,7 +95,7 @@ class LocalCommandRunner:
                 text=True,
                 timeout=shell_timeout,
                 cwd=cwd,
-                env=None,
+                env=env,
             )
             return CommandOutput(
                 exit_code=proc.returncode,
