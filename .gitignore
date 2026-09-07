@@ -1,0 +1,25 @@
+# ---- Python / uv ----
+.pyenv/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---- Data / runtime ----
+data/
+*.db
+*.sqlite3
+
+# ---- Env / secrets ----
+.env
+.env.local
+
+# ---- Tooling ----
+.idea/
+.vscode/
+.DS_Store
