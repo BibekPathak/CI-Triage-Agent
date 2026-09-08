@@ -104,7 +104,7 @@ class TriageRepository:
         if existing is not None:
             # Update existing row.
             new_row = state_to_row(state)
-            for col_name in TriageRunModel.__table__.columns.keys():  # type: ignore[union-attr]
+            for col_name in TriageRunModel.__table__.columns.keys():  # type: ignore[union-attr]  # noqa: SIM118
                 if col_name != "triage_id":
                     setattr(existing, col_name, getattr(new_row, col_name))
             return existing
