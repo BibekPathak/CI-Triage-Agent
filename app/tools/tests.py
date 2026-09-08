@@ -12,8 +12,12 @@ import re
 from pydantic import BaseModel, Field, PrivateAttr
 
 from app.models.domain import ActionClass, CheckStatus, TestResult, ToolResult, VerificationLevel
-from app.sandbox.runners import LocalCommandRunner
 from app.tools.base import Tool
+
+
+def _default_runner():
+    from app.sandbox.runners import LocalCommandRunner
+    return LocalCommandRunner()
 
 # pytest summary lines: "1 passed in 0.05s", "1 failed in 0.05s",
 # "47 passed, 2 failed, 1 skipped in 1.2s"
@@ -35,7 +39,7 @@ class RunTestsTool(Tool):
     params = RunTestsParams
     action_class = ActionClass.SANDBOX_WRITE
 
-    _runner = PrivateAttr(default_factory=LocalCommandRunner)
+    _runner = PrivateAttr(default_factory=_default_runner)
 
     def set_runner(self, runner) -> None:
         self._runner = runner

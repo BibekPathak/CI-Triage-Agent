@@ -11,8 +11,12 @@ from __future__ import annotations
 from pydantic import BaseModel, Field, PrivateAttr
 
 from app.models.domain import ActionClass, ToolResult
-from app.sandbox.runners import LocalCommandRunner
 from app.tools.base import Tool
+
+
+def _default_runner():
+    from app.sandbox.runners import LocalCommandRunner
+    return LocalCommandRunner()
 
 
 class RunCommandParams(BaseModel):
@@ -30,7 +34,7 @@ class ShellTool(Tool):
     params = RunCommandParams
     action_class = ActionClass.SANDBOX_WRITE
 
-    _runner = PrivateAttr(default_factory=LocalCommandRunner)
+    _runner = PrivateAttr(default_factory=_default_runner)
 
     def set_runner(self, runner) -> None:
         self._runner = runner

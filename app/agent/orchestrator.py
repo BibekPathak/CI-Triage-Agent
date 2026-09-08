@@ -25,6 +25,7 @@ from __future__ import annotations
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from app.agent.executor import ExecutedCall, Executor
 from app.agent.parser import is_infrastructure
@@ -37,6 +38,9 @@ from app.models.domain import (
 )
 from app.models.state import TriageState
 from app.observability.events import EventRecorder, RunEvent
+
+if TYPE_CHECKING:
+    from app.sandbox.manager import SandboxManager
 
 ContextSource = Callable[[TriageState], Awaitable[None]]
 
@@ -65,12 +69,15 @@ class Orchestrator:
         recorder: EventRecorder | None = None,
         budget: Budget | None = None,
         workspace_root: str = "",
+        sandbox_manager: SandboxManager | None = None,
     ) -> None:
         self.planner = planner
         self.executor = executor
         self.recorder = recorder or EventRecorder()
         self.budget = budget or Budget()
         self.workspace_root = workspace_root
+        self._sandbox_manager = sandbox_manager
+        self._sandbox_id: str | None = None
 
     # ------------------------------------------------------------------ #
     # Public entry point
@@ -78,6 +85,16 @@ class Orchestrator:
     async def run(self, state: TriageState, context_source: ContextSource) -> TriageOutcome:
         start = time.monotonic()
         try:
+            # Start sandbox if manager provided (Docker or local backend).
+            if self._sandbox_manager is not None:
+                self._sandbox_id = self._sandbox_manager.start(
+                    workspace_root=self.workspace_root,
+                )
+                from app.sandbox.runner import SandboxRunner
+
+                runner = SandboxRunner(self._sandbox_manager, self._sandbox_id)
+                self.executor.set_runner(runner)
+
             await self._collect(state, context_source)
             diag = await self._diagnose(state)
 
@@ -108,6 +125,11 @@ class Orchestrator:
             state.last_error = str(exc)
             self._emit(state, "error", "FAILED", decision=str(exc))
             return TriageOutcome(state, False, "error")
+        finally:
+            # Ensure sandbox cleanup even on abnormal termination.
+            if self._sandbox_manager is not None and self._sandbox_id is not None:
+                self._sandbox_manager.stop(self._sandbox_id)
+                self._sandbox_id = None
 
     # ------------------------------------------------------------------ #
     # Pipeline stages

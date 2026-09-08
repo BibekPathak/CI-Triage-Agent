@@ -1,0 +1,51 @@
+# CI Triage Agent Sandbox Image
+#
+# This image runs inside isolated Docker containers for safe command execution.
+# It includes Python, git, and common test/lint tools.
+#
+# Build:
+#   docker build -f docker/Dockerfile.sandbox -t ci-triage-sandbox:dev .
+#
+# Security:
+#   - No host Docker socket.
+#   - No host credentials.
+#   - CPU/memory limits enforced at runtime.
+#   - Network disabled by default.
+#   - Read-only root filesystem (workspace mounted rw).
+
+FROM python:3.12-slim AS sandbox
+
+# Prevent Python from writing .pyc files and enable unbuffered output.
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# Install system dependencies (git, common build tools).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install common Python test/lint tools globally.
+RUN pip install --no-cache-dir \
+    pytest \
+    pytest-cov \
+    ruff \
+    mypy \
+    black \
+    isort \
+    flake8
+
+# Create a non-root user for sandboxed execution.
+RUN groupadd -r sandbox && useradd -r -g sandbox -d /workspace -s /bin/bash sandbox
+
+# Create workspace directory.
+RUN mkdir -p /workspace && chown sandbox:sandbox /workspace
+
+WORKDIR /workspace
+
+# Switch to non-root user.
+USER sandbox
+
+# Default command (overridden at runtime).
+CMD ["sleep", "3600"]

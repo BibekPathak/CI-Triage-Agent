@@ -1,0 +1,37 @@
+# CI Triage Agent - Local Development
+#
+# Usage:
+#   docker compose up -d          # start postgres
+#   docker compose build sandbox  # build sandbox image
+#   docker compose down           # stop everything
+
+services:
+  # PostgreSQL database for persistence.
+  postgres:
+    image: postgres:16-alpine
+    container_name: cta-postgres
+    environment:
+      POSTGRES_USER: cta
+      POSTGRES_PASSWORD: cta_dev
+      POSTGRES_DB: triage
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cta -d triage"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Sandbox image (build only, not run as a service).
+  sandbox:
+    image: ci-triage-sandbox:dev
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.sandbox
+    # This is just for building the image; actual containers are created
+    # by the SandboxManager at runtime.
+
+volumes:
+  postgres_data:
