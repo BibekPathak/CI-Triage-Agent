@@ -96,6 +96,10 @@ class TriageRepository:
     def __init__(self, session: Session) -> None:
         self._s = session
 
+    def commit(self) -> None:
+        """Commit the current transaction."""
+        self._s.commit()
+
     # ----- triage runs -----
 
     def save_state(self, state: TriageState) -> TriageRunModel:

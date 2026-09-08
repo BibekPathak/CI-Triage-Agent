@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
 from app.api.deps import get_metrics, get_repository
 from app.api.schemas import (
@@ -40,15 +40,17 @@ def _state_to_response(state: TriageState) -> TriageRunResponse:
 @router.post("", response_model=TriageRunResponse, status_code=201)
 def create_triage(
     req: TriageRunRequest,
+    bg: BackgroundTasks,
     repo: Annotated[TriageRepository, Depends(get_repository)],
     m: Annotated[Metrics, Depends(get_metrics)],
 ) -> TriageRunResponse:
-    """Create and kick off a new triage run.
+    """Create and kick off a new triage run in the background.
 
-    In production this would trigger the orchestrator asynchronously; for
-    now it persists a stub state so the status / list endpoints work.
+    Persists an ``INITIALIZING`` stub immediately (so the run is visible via
+    the status / list endpoints), then runs the orchestrator as a background
+    task and updates the persisted state when it completes.
     """
-
+    from app.api.service import run_triage
     from app.models.domain import RunStatus
     from app.models.state import TriageState
 
@@ -59,6 +61,11 @@ def create_triage(
     )
     repo.save_state(state)
     m.counter("api_triggers").inc()
+
+    # A fresh repository bound to a new session must be used inside the
+    # background task (the request-scoped session closes when this returns).
+    bg.add_task(run_triage, req.repository, req.workflow_run_id, None)
+
     return _state_to_response(state)
 
 

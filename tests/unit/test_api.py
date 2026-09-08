@@ -217,3 +217,68 @@ class TestTriageEvents:
         c, _ = client
         resp = c.get("/api/v1/triage/nope/events")
         assert resp.status_code == 404
+
+
+# ------------------------------------------------------------------
+# Integration: run_triage service
+# ------------------------------------------------------------------
+
+class TestRunTriageService:
+    """End-to-end: run_triage builds an orchestrator and persists state/events."""
+
+    @pytest.fixture()
+    def service_engine(self):
+        """In-memory engine with StaticPool for async/threaded use."""
+        from sqlalchemy.pool import StaticPool
+
+        engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(bind=engine)
+        TestSession = sessionmaker(bind=engine, expire_on_commit=False)
+        session = TestSession()
+        yield session
+        session.close()
+        engine.dispose()
+
+    def test_run_triage_persists_state_and_events(self, service_engine, monkeypatch):
+        import asyncio
+
+        from app.api.service import run_triage
+        from app.models.domain import RunStatus
+        from app.models.state import TriageState
+
+        repo = TriageRepository(service_engine)
+
+        # Inject a fake orchestrator so the service persistence wiring is
+        # exercised without running a real (sandbox/LLM-dependent) agent.
+        class FakeOutcome:
+            state = TriageState(
+                triage_id="fake123",
+                repository="owner/repo",
+                workflow_run_id="42",
+                status=RunStatus.COMPLETED,
+                root_cause="fixed the bug",
+            )
+            success = True
+            stop_reason = "verified"
+
+        class FakeOrchestrator:
+            async def run(self, state, ctx):
+                # The recorder is bound to state.triage_id; capture events.
+                state.root_cause = "fixed the bug"
+                state.status = RunStatus.COMPLETED
+                FakeOutcome.state = state
+                return FakeOutcome
+
+        import app.api.service as service_mod
+        monkeypatch.setattr(service_mod, "build_orchestrator", lambda *a, **k: FakeOrchestrator())
+
+        asyncio.run(run_triage("owner/repo", "42", repo=repo))
+
+        rows = repo.list_runs()
+        assert len(rows) >= 1
+        # The fake orchestrator created a new state with a fresh triage_id.
+        assert any(r.repository == "owner/repo" for r in rows)

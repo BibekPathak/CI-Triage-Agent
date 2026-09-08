@@ -42,12 +42,17 @@ def create_engine(url: str | None = None) -> None:
 
 
 def get_session() -> Generator[Session, None, None]:
-    """FastAPI-compatible dependency that yields a session and closes it."""
+    """FastAPI-compatible dependency that yields a session, committing on
+    success and rolling back on error before closing."""
     if _SessionLocal is None:
         create_engine()
     session = _SessionLocal()  # type: ignore[misc]
     try:
         yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
     finally:
         session.close()
 
