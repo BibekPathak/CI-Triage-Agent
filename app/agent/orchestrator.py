@@ -38,6 +38,8 @@ from app.models.domain import (
 )
 from app.models.state import TriageState
 from app.observability.events import EventRecorder, RunEvent
+from app.observability.logging import get_logger
+from app.observability.metrics import metrics
 
 if TYPE_CHECKING:
     from app.sandbox.manager import SandboxManager
@@ -84,6 +86,15 @@ class Orchestrator:
     # ------------------------------------------------------------------ #
     async def run(self, state: TriageState, context_source: ContextSource) -> TriageOutcome:
         start = time.monotonic()
+        log = get_logger("orchestrator")
+        log.info(
+            "triage started: repo=%s run_id=%s",
+            state.repository,
+            state.workflow_run_id,
+            extra={"triage_id": state.triage_id, "repository": state.repository},
+        )
+        metrics.counter("triage_runs").inc()
+        metrics.gauge("active_runs").inc()
         try:
             # Start sandbox if manager provided (Docker or local backend).
             if self._sandbox_manager is not None:
@@ -130,6 +141,15 @@ class Orchestrator:
             if self._sandbox_manager is not None and self._sandbox_id is not None:
                 self._sandbox_manager.stop(self._sandbox_id)
                 self._sandbox_id = None
+            metrics.gauge("active_runs").dec()
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            metrics.histogram("triage_duration_ms").observe(elapsed_ms)
+            log.info(
+                "triage finished: status=%s elapsed_ms=%d",
+                state.status.value,
+                elapsed_ms,
+                extra={"triage_id": state.triage_id},
+            )
 
     # ------------------------------------------------------------------ #
     # Pipeline stages
@@ -364,6 +384,16 @@ class Orchestrator:
         self.recorder.record(
             RunEvent(run_id=state.triage_id, step=step, phase=phase, decision=decision)
         )
+        log = get_logger("orchestrator")
+        log.info(
+            "step=%s phase=%s decision=%s",
+            step,
+            phase,
+            decision[:120] if decision else "",
+            extra={"triage_id": state.triage_id, "step": step},
+        )
+        metrics.counter("agent_steps").inc()
+        metrics.counter(f"phase_{phase}").inc()
 
 
 def _err(message: str):

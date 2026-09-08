@@ -66,6 +66,14 @@ class Settings(BaseSettings):
         default="manual", alias="APPROVE_MODE"
     )  # "manual" | "auto"
 
+    # ----- Observability -----
+    log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    log_format: str = Field(default="json", alias="LOG_FORMAT")  # "json" | "text"
+    otel_enabled: bool = Field(default=False, alias="OTEL_ENABLED")
+    otel_endpoint: str | None = Field(default=None, alias="OTEL_ENDPOINT")
+    otel_service_name: str = Field(default="ci-triage-agent", alias="OTEL_SERVICE_NAME")
+    metrics_enabled: bool = Field(default=True, alias="METRICS_ENABLED")
+
 
 @lru_cache
 def get_settings() -> Settings:
