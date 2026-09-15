@@ -24,6 +24,19 @@ class DiffResult:
     nonempty: bool = False
 
 
+@dataclass
+class PatchOutcome:
+    """Result of applying a single-file patch, with review metadata."""
+
+    file: str
+    original: str
+    replacement: str
+    unified_diff: str = ""
+    ok: bool = True
+    verified: bool = False
+    error: str = ""
+
+
 def _git(root: str, *args: str, timeout: float = 30.0) -> subprocess.CompletedProcess[str]:
     """Run a git command scoped to *root* without a shell."""
     try:
@@ -133,4 +146,45 @@ def _dedupe(items: list[str]) -> list[str]:
     return seen
 
 
-__all__ = ["DiffResult", "capture_diff", "validate_unexpected_changes"]
+def build_unified_diff(file_path: str, before: str, after: str) -> str:
+    """Produce a minimal unified diff for a single file.
+
+    Falls back to a per-line ``-``/``+`` listing (sufficient for review and
+    for the agent to reason about the change) rather than depending on a
+    full LCS-based hunks.
+    """
+    a_lines = before.splitlines()
+    b_lines = after.splitlines()
+
+    lines = [f"--- a/{file_path}", f"+++ b/{file_path}"]
+    a_count = len(a_lines)
+    b_count = len(b_lines)
+    lines.append(f"@@ -1,{a_count or 1} +1,{b_count or 1} @@")
+
+    a_idx = 0
+    b_idx = 0
+    while a_idx < a_count and b_idx < b_count:
+        if a_lines[a_idx] == b_lines[b_idx]:
+            lines.append(" " + a_lines[a_idx])
+            a_idx += 1
+            b_idx += 1
+        else:
+            lines.append("-" + a_lines[a_idx])
+            a_idx += 1
+    while a_idx < a_count:
+        lines.append("-" + a_lines[a_idx])
+        a_idx += 1
+    while b_idx < b_count:
+        lines.append("+" + b_lines[b_idx])
+        b_idx += 1
+
+    return "\n".join(lines) + "\n"
+
+
+__all__ = [
+    "DiffResult",
+    "PatchOutcome",
+    "build_unified_diff",
+    "capture_diff",
+    "validate_unexpected_changes",
+]

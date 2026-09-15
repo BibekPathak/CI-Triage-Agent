@@ -41,7 +41,7 @@ from app.models.state import TriageState
 from app.observability.events import EventRecorder, RunEvent
 from app.observability.logging import get_logger
 from app.observability.metrics import metrics
-from app.repo import capture_diff, validate_unexpected_changes
+from app.repo import build_unified_diff, capture_diff, validate_unexpected_changes
 
 if TYPE_CHECKING:
     from app.sandbox.manager import SandboxManager
@@ -344,13 +344,38 @@ class Orchestrator:
             )
         new_text = text.replace(original, replacement, 1)
         target.write_text(new_text, encoding="utf-8")
+
         from app.models.domain import ToolResult
+
+        # Verify the filesystem actually changed before reporting success.
+        read_back = target.read_text(encoding="utf-8", errors="replace")
+        if replacement not in read_back or original in read_back:
+            return ExecutedCall(
+                "apply_patch", {},
+                _err("patch wrote target file but verification read-back failed"),
+                action_class=ActionClass.SANDBOX_WRITE,
+            )
 
         return ExecutedCall(
             "apply_patch", {},
-            ToolResult(tool="apply_patch", ok=True),
+            ToolResult(
+                tool="apply_patch",
+                ok=True,
+                data={
+                    "file": file_path,
+                    "changed_files": [file_path],
+                    "before": original,
+                    "after": replacement,
+                    "unified_diff": build_unified_diff(
+                        file_path, original, replacement
+                    ),
+                    "verified": True,
+                },
+            ),
             action_class=ActionClass.SANDBOX_WRITE,
         )
+
+
 
     def _capture_diff(self, state: TriageState, expected_file: str) -> str:
         """Capture the real working-tree git diff for the patch.

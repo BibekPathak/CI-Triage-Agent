@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from app.repo.diff import (
+    PatchOutcome,
+    build_unified_diff,
     capture_diff,
     validate_unexpected_changes,
 )
@@ -80,3 +82,36 @@ class TestValidateUnexpectedChanges:
             allowed_prefixes=["tests/"],
         )
         assert violations == []
+
+
+class TestBuildUnifiedDiff:
+    def test_marks_removed_and_added_lines(self):
+        diff = build_unified_diff(
+            "src/x.py",
+            "def add(a, b):\n    return a - b\n",
+            "def add(a, b):\n    return a + b\n",
+        )
+        assert "--- a/src/x.py" in diff
+        assert "+++ b/src/x.py" in diff
+        assert "-    return a - b" in diff
+        assert "+    return a + b" in diff
+
+    def test_heading_uses_file_path(self):
+        diff = build_unified_diff("tests/test_y.py", "a", "b")
+        assert "--- a/tests/test_y.py" in diff
+        assert "+++ b/tests/test_y.py" in diff
+
+    def test_unchanged_lines_prefixed_with_space(self):
+        diff = build_unified_diff("src/x.py", "keep1\nkeep2\n", "keep1\nkeep3\n")
+        assert " keep1" in diff
+        assert "-keep2" in diff
+        assert "+keep3" in diff
+
+
+class TestPatchOutcome:
+    def test_defaults(self):
+        out = PatchOutcome(file="src/x.py", original="a", replacement="b")
+        assert out.ok is True
+        assert out.verified is False
+        assert out.error == ""
+        assert out.unified_diff == ""
