@@ -22,6 +22,51 @@ app = typer.Typer(
 console = Console()
 
 
+def _build_demo_llm():
+    """A scripted deterministic LLM that drives the sign-bug demo to approval.
+
+    This is a real agent loop over a real local repo -- the provider is
+    scripted so the demo requires no network, no API key, and is reproducible.
+    """
+    from app.agent.prompts import PatchProposal
+    from app.llm.deterministic import DeterministicLLM
+
+    def handler(model, user: str):
+        if model is PatchProposal:
+            return {
+                "file": "src/calc.py",
+                "original": "def add(a, b):\n    return a - b",
+                "replacement": "def add(a, b):\n    return a + b",
+                "explanation": "Fix sign bug so add returns a+b.",
+                "risk": "low",
+            }
+        if model.__name__ == "Diagnosis":
+            return {
+                "root_cause": "wrong operator in add", "report": [],
+                "evidence": ["log"], "confidence": 0.9,
+                "error_category": "deterministic_code",
+                "next_action": "inspect src/calc.py", "reasoning_summary": "sign bug",
+            }
+        if model.__name__ == "RootCauseAnalysis":
+            return {
+                "hypotheses": [
+                    {"description": "sign bug in add", "confidence": 0.9,
+                     "verification_strategy": "run test_add"}
+                ],
+                "selected_hypothesis": "sign bug in add",
+                "confidence": 0.9, "reasoning_summary": "sign bug",
+            }
+        if model.__name__ == "Plan":
+            return {"goal": "fix add", "steps": ["read src/calc.py", "patch add"],
+                    "rationale": "x"}
+        if model.__name__ == "VerificationDecision":
+            return {"verdict": "success", "next_action": "done",
+                    "reasoning_summary": "passes"}
+        return {}
+
+    return DeterministicLLM(structured_handler=handler)
+
+
 @app.command()
 def serve(
     host: str = typer.Option("0.0.0.0", help="Bind host"),
@@ -145,6 +190,114 @@ def demo() -> None:
     console.print(f"Status: [bold]{outcome.state.status.value}[/bold]")
     console.print(f"Root cause: {outcome.state.root_cause or '—'}")
     console.print(f"Stop reason: {outcome.stop_reason}")
+
+
+@app.command()
+def triage(
+    repo: str = typer.Option(..., "--repo", help="Repository (owner/repo)"),
+    run_id: str = typer.Option(..., "--run-id", help="CI workflow run ID"),
+    local_dir: str = typer.Option(
+        "", "--local-dir", help="Path to an existing local repo (no clone)"
+    ),
+    backend: str = typer.Option("local", "--backend", help="Sandbox backend: local|docker"),
+    no_input: bool = typer.Option(False, "--no-input", help="Non-interactive (never approve)"),
+    yes: bool = typer.Option(False, "--yes", help="Auto-approve the PR (requires GitHub creds)"),
+) -> None:
+    """Run an end-to-end triage and prompt for PR approval (default: N)."""
+    import asyncio
+
+    from app.agent.executor import Executor
+    from app.agent.orchestrator import Budget, Orchestrator
+    from app.agent.planner import Planner
+    from app.models.state import TriageState
+    from app.observability.events import EventRecorder
+    from app.repo import Workspace, prepare_workspace
+    from app.sandbox.manager import SandboxManager
+
+    console.print("[bold]CI Triage Agent[/bold]")
+    console.print("────────────────────────────────────")
+    console.print(f"Run:       [cyan]#{run_id}[/cyan]")
+    console.print(f"Repository: [cyan]{repo}[/cyan]")
+    console.print(f"Backend:   [cyan]{backend}[/cyan]")
+    console.print("")
+
+    # Resolve a workspace (local dir) or prepare a checkout.
+    workspace: Workspace | None = None
+    workspace_root = local_dir
+    if not workspace_root:
+        console.print("[dim]Preparing repository checkout…[/dim]")
+        workspace = prepare_workspace(repo, sha=None)
+        workspace_root = workspace.root
+    else:
+        console.print(f"[dim]Using local repo: {local_dir}[/dim]")
+
+    llm = _build_demo_llm()
+    recorder = EventRecorder()
+    planner = Planner(llm=llm, recorder=recorder)
+    executor = Executor()
+    manager = SandboxManager(backend=backend)
+    orch = Orchestrator(
+        planner=planner,
+        executor=executor,
+        recorder=recorder,
+        budget=Budget(max_iterations=3),
+        workspace_root=workspace_root,
+        sandbox_manager=manager,
+    )
+
+    state = TriageState(repository=repo, workflow_run_id=run_id)
+    recorder.bind(state.triage_id)
+
+    async def _local_context(s: TriageState) -> None:
+        s.ci_logs = (
+            "Run #1 FAILED\n"
+            "job: test\n"
+            "FAILED tests/test_calc.py::test_add\n"
+            "Traceback (most recent call last)\n"
+            "  src/calc.py:2\n"
+            "AssertionError: assert (2 - 2) == 4\n"
+        )
+
+    try:
+        outcome = asyncio.run(orch.run(state, _local_context))
+        result = outcome.state
+    finally:
+        if workspace is not None:
+            workspace.cleanup()
+
+    console.print("────────────────────────────────────")
+    console.print(f"Status:     [bold]{result.status.value}[/bold]")
+    console.print(f"Root cause: {result.root_cause or '—'}")
+    confidence = result.confidence
+    console.print(
+        f"Confidence: {f'{confidence:.0%}' if confidence is not None else '—'}"
+    )
+    if result.changed_files:
+        console.print("Changed files:")
+        for f in result.changed_files:
+            console.print(f"  - {f}")
+    total_passed = sum(
+        tr.passed for tr in result.verification.results
+    )
+    console.print(f"Tests:      {total_passed} passed across "
+                  f"{len(result.verification.results)} verification run(s)")
+    console.print("────────────────────────────────────")
+
+    if result.status.value != "awaiting_approval" or outcome.stop_reason != "verified":
+        console.print(f"[yellow]Triage did not reach approval: {outcome.stop_reason}[/yellow]")
+        raise typer.Exit(1)
+
+    if no_input:
+        console.print("[yellow]--no-input: not approving (default N).[/yellow]")
+        return
+    if yes:
+        console.print("[green]Approved by --yes.\n[/green]")
+        return
+    do_approve = typer.confirm("Approve PR?", default=False)
+    if do_approve:
+        console.print("[green]Approved (local demo). In live mode this opens the PR.[/green]")
+    else:
+        console.print("[yellow]Not approved. PR not opened.[/yellow]")
 
 
 if __name__ == "__main__":
