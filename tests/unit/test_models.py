@@ -6,11 +6,39 @@ from app.models import (
     ErrorType,
     Hypothesis,
     PlanStep,
+    RunStatus,
     TestResult,
     TriageState,
     VerificationLevel,
     VerificationReport,
 )
+
+
+def test_run_status_api_normalization():
+    # Fine-grained executing states collapse to a single "running".
+    assert RunStatus.COLLECTING.api_status() == "running"
+    assert RunStatus.DIAGNOSING.api_status() == "running"
+    assert RunStatus.PLANNING.api_status() == "running"
+    assert RunStatus.REPRODUCING.api_status() == "running"
+    assert RunStatus.PATCHING.api_status() == "running"
+    assert RunStatus.VERIFYING.api_status() == "running"
+
+    # Terminal / explicit states pass through unchanged.
+    assert RunStatus.INITIALIZING.api_status() == "initializing"
+    assert RunStatus.RUNNING.api_status() == "running"
+    assert RunStatus.AWAITING_APPROVAL.api_status() == "awaiting_approval"
+    assert RunStatus.COMPLETED.api_status() == "completed"
+    assert RunStatus.FAILED.api_status() == "failed"
+    assert RunStatus.CANCELLED.api_status() == "cancelled"
+
+
+def test_run_status_is_executing():
+    from app.models.domain import is_run_executing
+
+    assert is_run_executing(RunStatus.DIAGNOSING)
+    assert is_run_executing(RunStatus.PATCHING)
+    assert not is_run_executing(RunStatus.COMPLETED)
+    assert not is_run_executing(RunStatus.AWAITING_APPROVAL)
 
 
 def test_triage_state_roundtrip_and_digest():

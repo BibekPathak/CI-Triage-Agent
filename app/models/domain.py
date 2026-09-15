@@ -76,6 +76,7 @@ class ApprovalStatus(StrEnum):
 
 class RunStatus(StrEnum):
     INITIALIZING = "initializing"
+    RUNNING = "running"
     COLLECTING = "collecting"
     DIAGNOSING = "diagnosing"
     PLANNING = "planning"
@@ -86,6 +87,35 @@ class RunStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+    def api_status(self) -> str:
+        """Normalized status for API consumers.
+
+        Fine-grained executing states are collapsed to a single ``running``
+        value, yielding one of:
+        ``initializing | running | awaiting_approval | completed | failed |
+        cancelled``.
+        """
+        if self.value in _RUN_EXECUTING_VALUES:
+            return RunStatus.RUNNING.value
+        return self.value
+
+
+_RUN_EXECUTING_VALUES = frozenset(
+    {
+        "collecting",
+        "diagnosing",
+        "planning",
+        "reproducing",
+        "patching",
+        "verifying",
+    }
+)
+
+
+def is_run_executing(status: RunStatus) -> bool:
+    """True if *status* represents an in-flight run."""
+    return status.value in _RUN_EXECUTING_VALUES
 
 
 # --------------------------------------------------------------------------- #

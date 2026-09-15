@@ -196,6 +196,7 @@ class Orchestrator:
             content = self._read_workspace_file(target)
             patch = await self.planner.propose_patch(state, target, content)
 
+            state.status = RunStatus.PATCHING
             # 2. Apply the patch in the isolated workspace.
             applied = self._apply_patch(
                 state, patch.file or target, patch.original, patch.replacement
@@ -211,6 +212,7 @@ class Orchestrator:
             self._emit(state, "patch", "PATCH", decision="applied " + (patch.file or target))
 
             # 3. Verify: original failing test + related + full suite.
+            state.status = RunStatus.VERIFYING
             await self._verify_layers(state, reproduce_cmd)
 
             # 4. Decide.

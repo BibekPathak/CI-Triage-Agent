@@ -15,6 +15,7 @@ from app.api.schemas import (
     TriageRunResponse,
 )
 from app.db.repository import TriageRepository
+from app.models.domain import RunStatus
 from app.models.state import TriageState
 from app.observability.metrics import Metrics
 
@@ -27,7 +28,7 @@ def _state_to_response(state: TriageState) -> TriageRunResponse:
         triage_id=state.triage_id,
         repository=state.repository,
         workflow_run_id=state.workflow_run_id,
-        status=state.status.value,
+        status=state.status.api_status(),
         root_cause=state.root_cause,
         confidence=state.confidence,
         proposed_pr_title=state.proposed_pr_title,
@@ -51,7 +52,6 @@ def create_triage(
     task and updates the persisted state when it completes.
     """
     from app.api.service import run_triage
-    from app.models.domain import RunStatus
     from app.models.state import TriageState
 
     state = TriageState(
@@ -84,7 +84,7 @@ def list_triages(
             triage_id=r.triage_id,
             repository=r.repository,
             workflow_run_id=r.workflow_run_id,
-            status=r.status,
+            status=RunStatus(r.status).api_status() if r.status else r.status,
             root_cause=r.root_cause,
             confidence=r.confidence,
             proposed_pr_title=r.proposed_pr_title,
@@ -109,7 +109,7 @@ def get_triage(
         triage_id=state.triage_id,
         repository=state.repository,
         workflow_run_id=state.workflow_run_id,
-        status=state.status.value,
+        status=state.status.api_status(),
         root_cause=state.root_cause,
         confidence=state.confidence,
         proposed_pr_title=state.proposed_pr_title,
