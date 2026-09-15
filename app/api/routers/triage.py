@@ -137,10 +137,15 @@ def get_triage(
 def approve_triage(
     triage_id: str,
     req: ApprovalRequest,
+    bg: BackgroundTasks,
     repo: Annotated[TriageRepository, Depends(get_repository)],
     m: Annotated[Metrics, Depends(get_metrics)],
 ) -> TriageRunResponse:
-    """Approve or reject a pending fix."""
+    """Approve or reject a pending fix.
+
+    On approval, opens the fix PR as a background task (reconstructed from the
+    persisted patch), crossing the human-consent boundary for the REMOTE_WRITE.
+    """
     from app.models.domain import ApprovalStatus
 
     state = repo.get_state(triage_id)
@@ -150,6 +155,8 @@ def approve_triage(
     if req.approve:
         state.approval_status = ApprovalStatus.APPROVED
         state.diff_signed_off = True
+        serialized = state.model_dump_json()
+        bg.add_task(_open_pr_wrapper, serialized)
     else:
         state.approval_status = ApprovalStatus.REJECTED
 
@@ -157,6 +164,42 @@ def approve_triage(
     repo.save_state(state)
     m.counter("api_approvals").inc()
     return _state_to_response(state)
+
+
+def _open_pr_wrapper(serialized_state: str) -> None:
+    """Reconstruct state and open the fix PR in a fresh DB session.
+
+    Runs as a FastAPI background task after the request session has closed.
+    Failures are recorded on the run rather than crashing the task.
+    """
+    from app.db.engine import session_factory
+    from app.db.repository import TriageRepository
+    from app.github.write import open_fix_pr
+
+    state = TriageState.model_validate_json(serialized_state)
+    session = session_factory()
+    try:
+        repo = TriageRepository(session)
+        try:
+            result = open_fix_pr(state.repository, state, client=None)
+            final = repo.get_state(state.triage_id)
+            if final is not None:
+                final.proposed_pr_body = (final.proposed_pr_body or "") + (
+                    f"\n\nPR: {result.pr_url}"
+                )
+                repo.save_state(final)
+                repo.commit()
+        except Exception as exc:  # noqa: BLE001 - surface as notes, not crash
+            final = repo.get_state(state.triage_id)
+            if final is not None:
+                final.last_error = f"PR write failed: {exc}"
+                final.proposed_pr_body = (final.proposed_pr_body or "") + (
+                    f"\n\nPR write failed: {exc}"
+                )
+                repo.save_state(final)
+                repo.commit()
+    finally:
+        session.close()
 
 
 @router.get("/{triage_id}/events", response_model=list[EventResponse])
