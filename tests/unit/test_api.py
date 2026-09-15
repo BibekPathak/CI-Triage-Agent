@@ -243,7 +243,9 @@ class TestRunTriageService:
         session.close()
         engine.dispose()
 
-    def test_run_triage_persists_state_and_events(self, service_engine, monkeypatch):
+    def test_run_triage_persists_state_and_events(
+        self, service_engine, monkeypatch, tmp_path
+    ):
         import asyncio
 
         from app.api.service import run_triage
@@ -276,9 +278,35 @@ class TestRunTriageService:
         import app.api.service as service_mod
         monkeypatch.setattr(service_mod, "build_orchestrator", lambda *a, **k: FakeOrchestrator())
 
-        asyncio.run(run_triage("owner/repo", "42", repo=repo))
+        # Provide an explicit workspace_root so run_triage skips the repo
+        # checkout (which would otherwise attempt a network fetch).
+        asyncio.run(run_triage("owner/repo", "42", repo=repo, workspace_root=str(tmp_path)))
 
         rows = repo.list_runs()
         assert len(rows) >= 1
         # The fake orchestrator created a new state with a fresh triage_id.
         assert any(r.repository == "owner/repo" for r in rows)
+
+
+class TestSandboxWiring:
+    """build_orchestrator wires a sandbox when a workspace_root is provided."""
+
+    def test_build_orchestrator_wires_sandbox(self, tmp_path, monkeypatch):
+        from app.api.service import build_orchestrator
+        from app.llm.deterministic import DeterministicLLM
+
+        # Force a deterministic provider (no API key needed).
+        monkeypatch.setattr("app.api.service.build_provider", lambda *a, **k: DeterministicLLM())
+
+        orch = build_orchestrator(workspace_root=str(tmp_path))
+        assert orch._sandbox_manager is not None
+        assert orch.workspace_root == str(tmp_path)
+
+    def test_build_orchestrator_no_sandbox_without_workspace(self, monkeypatch):
+        from app.api.service import build_orchestrator
+        from app.llm.deterministic import DeterministicLLM
+
+        monkeypatch.setattr("app.api.service.build_provider", lambda *a, **k: DeterministicLLM())
+        orch = build_orchestrator()
+        assert orch._sandbox_manager is None
+        assert orch.workspace_root == ""
