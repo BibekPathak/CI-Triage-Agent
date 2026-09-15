@@ -7,11 +7,14 @@ and persists the resulting state + events to the database.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+
 from app.agent.executor import Executor
 from app.agent.orchestrator import Budget, Orchestrator
 from app.agent.planner import Planner
 from app.db.repository import TriageRepository
 from app.llm import build_provider
+from app.models.state import TriageState
 from app.observability.events import EventRecorder
 from app.observability.logging import get_logger
 
@@ -44,6 +47,7 @@ async def run_triage(
     repo: TriageRepository | None = None,
     recorder: EventRecorder | None = None,
     budget: Budget | None = None,
+    context_source: Callable[[TriageState], Awaitable[None]] | None = None,
 ) -> None:
     """Run a full triage for a repo/run and persist the outcome.
 
@@ -51,14 +55,19 @@ async def run_triage(
     immediately while the triage executes.  When ``repo`` is None, a fresh DB
     session/repository is created (for background use after the request
     session has closed).
+
+    ``context_source`` populates the state's CI context before the agent runs.
+    Defaults to a real GitHub-backed collector (see ``app.github.context``).
     """
+    from app.github.context import build_github_context_source
     from app.models.domain import RunStatus
-    from app.models.state import TriageState
+
+    if context_source is None:
+        context_source = build_github_context_source()
 
     owns_session = repo is None
     if repo is None:
         from app.db.engine import session_factory
-        from app.db.repository import TriageRepository
 
         session = session_factory()
         repo = TriageRepository(session)
@@ -87,12 +96,7 @@ async def run_triage(
             extra={"triage_id": state.triage_id, "repository": repository},
         )
 
-        async def _noop_context(s: TriageState) -> None:
-            # In production this would fetch real CI logs via GitHub; for now
-            # the caller may populate logs directly on the persisted state.
-            s.ci_logs = s.ci_logs or ""
-
-        outcome = await orchestrator.run(state, _noop_context)
+        outcome = await orchestrator.run(state, context_source)
 
         # Persist final state + drained events.
         repo.save_state(outcome.state)
