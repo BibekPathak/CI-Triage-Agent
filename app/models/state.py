@@ -53,6 +53,7 @@ class TriageState(BaseModel):
     changed_files: list[str] = Field(default_factory=list)
     candidate_patch: str | None = None
     diff_signed_off: bool = False
+    unexpected_changes: list[str] = Field(default_factory=list)
 
     # ----- Verification -----
     verification: VerificationReport = Field(default_factory=VerificationReport)

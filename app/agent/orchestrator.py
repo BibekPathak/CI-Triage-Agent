@@ -25,6 +25,7 @@ from __future__ import annotations
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from app.agent.executor import ExecutedCall, Executor
@@ -40,6 +41,7 @@ from app.models.state import TriageState
 from app.observability.events import EventRecorder, RunEvent
 from app.observability.logging import get_logger
 from app.observability.metrics import metrics
+from app.repo import capture_diff, validate_unexpected_changes
 
 if TYPE_CHECKING:
     from app.sandbox.manager import SandboxManager
@@ -206,10 +208,19 @@ class Orchestrator:
                 self._emit(state, "patch", "PATCH", decision="failed to apply")
                 return TriageOutcome(state, False, "patch_apply_failed")
 
-            state.changed_files = self._dedupe(state.changed_files + [patch.file or target])
-            state.candidate_patch = self._capture_diff()
-            state.diff_signed_off = True
-            self._emit(state, "patch", "PATCH", decision="applied " + (patch.file or target))
+            state.candidate_patch = self._capture_diff(state, patch.file or target)
+            state.diff_signed_off = not state.unexpected_changes
+            suffix = (
+                f" (unexpected: {state.unexpected_changes})"
+                if state.unexpected_changes
+                else ""
+            )
+            self._emit(
+                state,
+                "patch",
+                "PATCH",
+                decision="applied " + (patch.file or target) + suffix,
+            )
 
             # 3. Verify: original failing test + related + full suite.
             state.status = RunStatus.VERIFYING
@@ -341,9 +352,30 @@ class Orchestrator:
             action_class=ActionClass.SANDBOX_WRITE,
         )
 
-    def _capture_diff(self) -> str:
-        # Phase 6 replaces this with a real git diff over the workspace.
-        return "   <working-tree diff not captured until Phase 6 (git)>"
+    def _capture_diff(self, state: TriageState, expected_file: str) -> str:
+        """Capture the real working-tree git diff for the patch.
+
+        Populates ``state.changed_files`` from git and flags any files the
+        agent modified that were not expected.  Falls back to the patched
+        target only when the workspace is not a git repository.
+        """
+        state.unexpected_changes = []
+
+        if self.workspace_root and (Path(self.workspace_root) / ".git").exists():
+            diff = capture_diff(self.workspace_root)
+            state.changed_files = self._dedupe(state.changed_files + diff.changed_files)
+            state.unexpected_changes = validate_unexpected_changes(
+                diff.changed_files, [expected_file]
+            )
+            if diff.diff_text:
+                return diff.diff_text
+            if not diff.nonempty:
+                return f"   (no git changes captured in workspace for {expected_file})"
+
+        # No git repo present (e.g. sandbox-less / fixture run): fall back to
+        # the patched target so downstream stages still have a candidate patch.
+        state.changed_files = self._dedupe(state.changed_files + [expected_file])
+        return f"   (workspace is not a git repo; changed file: {expected_file})"
 
     @staticmethod
     def _dedupe(items: list[str]) -> list[str]:
