@@ -54,6 +54,41 @@ def build_orchestrator(
     )
 
 
+def is_resumable(state: TriageState) -> bool:
+    """True if a persisted run can be resumed at the approval boundary.
+
+    Resumable means the run paused at ``AWAITING_APPROVAL`` with a captured,
+    signed-off patch -- i.e. it can be picked up after a restart to open PR.
+    """
+    from app.models.domain import RunStatus
+
+    return (
+        state.status == RunStatus.AWAITING_APPROVAL
+        and state.diff_signed_off
+        and bool(state.candidate_patch)
+    )
+
+
+def resume_triage(
+    triage_id: str,
+    repo: TriageRepository,
+) -> TriageState:
+    """Load a persisted run and return it if it can be resumed.
+
+    Raises :class:`RuntimeError` with a clear message otherwise, so callers can
+    surface a 4xx/notice instead of silently approving an unusable run.
+    """
+    state = repo.get_state(triage_id)
+    if state is None:
+        raise RuntimeError(f"triage run not found: {triage_id}")
+    if not is_resumable(state):
+        raise RuntimeError(
+            f"triage run {triage_id} is not resumable "
+            f"(status={state.status.value}, patch={'yes' if state.candidate_patch else 'no'})"
+        )
+    return state
+
+
 async def run_triage(
     repository: str,
     workflow_run_id: str,

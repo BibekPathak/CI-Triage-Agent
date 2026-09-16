@@ -14,6 +14,7 @@ from app.api.schemas import (
     TriageRunRequest,
     TriageRunResponse,
 )
+from app.api.service import is_resumable, resume_triage
 from app.db.repository import TriageRepository
 from app.models.domain import RunStatus
 from app.models.state import TriageState
@@ -152,6 +153,9 @@ def approve_triage(
     if state is None:
         raise HTTPException(status_code=404, detail="Triage run not found")
 
+    if req.approve and not is_resumable(state):
+        raise HTTPException(status_code=409,
+                            detail="Triage run is not resumable (no signed-off patch at approval)")
     if req.approve:
         state.approval_status = ApprovalStatus.APPROVED
         state.diff_signed_off = True
@@ -164,6 +168,48 @@ def approve_triage(
     repo.save_state(state)
     m.counter("api_approvals").inc()
     return _state_to_response(state)
+
+
+@router.post("/{triage_id}/resume", response_model=TriageRunDetailResponse)
+def resume_triage_endpoint(
+    triage_id: str,
+    repo: Annotated[TriageRepository, Depends(get_repository)],
+) -> TriageRunDetailResponse:
+    """Check whether a persisted run can be resumed (survived a restart).
+
+    Returns the full state if the run is resumable at the approval boundary;
+    otherwise raises 409 with a clear reason.
+    """
+    try:
+        state = resume_triage(triage_id, repo)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return TriageRunDetailResponse(
+        triage_id=state.triage_id,
+        repository=state.repository,
+        workflow_run_id=state.workflow_run_id,
+        status=state.status.api_status(),
+        root_cause=state.root_cause,
+        confidence=state.confidence,
+        proposed_pr_title=state.proposed_pr_title,
+        approval_status=state.approval_status.value,
+        created_at=state.created_at,
+        updated_at=state.updated_at,
+        ci_logs=state.ci_logs,
+        hypotheses=[h.model_dump() for h in state.hypotheses],
+        plan=[s.model_dump() for s in state.plan],
+        changed_files=state.changed_files,
+        candidate_patch=state.candidate_patch,
+        verification=state.verification.model_dump(),
+        iterations=state.iterations,
+        tool_calls=state.tool_calls,
+        llm_calls=state.llm_calls,
+        tokens_in=state.tokens_in,
+        tokens_out=state.tokens_out,
+        estimated_cost=state.estimated_cost,
+        last_error=state.last_error,
+        final_result=state.final_result,
+    )
 
 
 def _open_pr_wrapper(serialized_state: str) -> None:

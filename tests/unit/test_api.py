@@ -73,6 +73,27 @@ def _seed_state(session, triage_id: str = "test123") -> None:
     session.commit()
 
 
+def _seed_resumable_state(session, triage_id: str = "abc123") -> None:
+    """Seed a run paused at WAITING_APPROVAL with a signed-off patch."""
+    state = TriageState(
+        triage_id=triage_id,
+        repository="owner/repo",
+        workflow_run_id="42",
+        status=RunStatus.AWAITING_APPROVAL,
+        approval_required=True,
+        diff_signed_off=True,
+    )
+    state.candidate_patch = (
+        "--- a/src/payment.py\n+++ b/src/payment.py\n"
+        "@@ -1,2 +1,2 @@\n def add(a, b):\n-    return a - b\n"
+        "+    return a + b\n"
+    )
+    state.proposed_pr_title = "fix: payment"
+    from app.db.repository import state_to_row
+    session.add(state_to_row(state))
+    session.commit()
+
+
 # ------------------------------------------------------------------
 # Health
 # ------------------------------------------------------------------
@@ -167,15 +188,23 @@ class TestGetTriage:
 
 
 class TestApproveTriage:
-    def test_approve(self, client, db_session):
+    def test_approve(self, client, db_session, monkeypatch):
         c, _ = client
-        _seed_state(db_session, "abc123")
+        _seed_resumable_state(db_session, "abc123")
+        # Stub the background PR write so the test does not hit the network.
+        monkeypatch.setattr("app.api.routers.triage._open_pr_wrapper", lambda _s: None)
         resp = c.post("/api/v1/triage/abc123/approve", json={
             "approve": True,
             "comment": "looks good",
         })
         assert resp.status_code == 200
         assert resp.json()["approval_status"] == "approved"
+
+    def test_approve_not_resumable(self, client, db_session):
+        c, _ = client
+        _seed_state(db_session, "abc123")
+        resp = c.post("/api/v1/triage/abc123/approve", json={"approve": True})
+        assert resp.status_code == 409
 
     def test_reject(self, client, db_session):
         c, _ = client
