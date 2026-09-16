@@ -25,4 +25,4 @@ demo:
 	$(PYTHON) -m app.cli demo
 
 benchmark:
-	$(PYTHON) -m benchmark.run
+	$(PYTHON) -m app.cli benchmark

@@ -300,5 +300,17 @@ def triage(
         console.print("[yellow]Not approved. PR not opened.[/yellow]")
 
 
+@app.command()
+def benchmark(limit: int = typer.Option(10, "--limit", help="Scenarios to run (1-10)")) -> None:
+    """Run the deterministic local benchmark suite."""
+    from app.evaluation.runner import report, run_benchmark
+    from app.evaluation.scenarios import all_scenarios
+
+    scenarios = all_scenarios()[:limit]
+    console.print(f"[bold]Running benchmark: {len(scenarios)} scenario(s)[/bold]")
+    results = run_benchmark(scenarios)
+    report(results)
+
+
 if __name__ == "__main__":
     app()
