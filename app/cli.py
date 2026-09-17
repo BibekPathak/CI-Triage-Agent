@@ -161,35 +161,103 @@ def list_runs(
 
 @app.command()
 def demo() -> None:
-    """Run a demo triage with deterministic LLM (no API key needed)."""
+    """Run a self-contained demo (no API key / token / internet).
+
+    Creates a temporary broken repo, drives the deterministic agent through the
+    full local flow (collect -> diagnose -> plan -> reproduce -> patch ->
+    verify), shows the diff, and stops before any remote write.
+    """
     import asyncio
+    import subprocess
+    import tempfile
+    from pathlib import Path
 
     from app.agent.executor import Executor
     from app.agent.orchestrator import Budget, Orchestrator
     from app.agent.planner import Planner
-    from app.llm.deterministic import DeterministicLLM
     from app.models.state import TriageState
+    from app.observability.events import EventRecorder
 
-    console.print("[bold]Running demo triage…[/bold]")
+    console.print("[bold]CI Triage Agent — Demo[/bold]")
+    console.print("[dim]No network. No API key. No GitHub token.[/dim]")
+    console.print("")
 
-    llm = DeterministicLLM()
-    planner = Planner(llm=llm)
-    executor = Executor(registry=None, policy=None)
+    with tempfile.TemporaryDirectory(prefix="cta-demo-") as tmp:
+        root = Path(tmp)
+        (root / "src").mkdir()
+        (root / "tests").mkdir()
+        (root / "conftest.py").write_text("")
+        (root / "src" / "calc.py").write_text(
+            "def add(a, b):\n    return a - b\n"
+        )
+        (root / "tests" / "test_calc.py").write_text(
+            "from src.calc import add\n\n\n"
+            "def test_add():\n    assert add(2, 2) == 4\n"
+        )
+        subprocess.run(["git", "-C", str(root), "init", "-q", "-b", "main"])
+        subprocess.run(["git", "-C", str(root), "config", "user.name", "t"])
+        subprocess.run(["git", "-C", str(root), "config", "user.email", "t@t"])
+        subprocess.run(["git", "-C", str(root), "add", "-A"])
+        subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "init"])
 
-    state = TriageState(
-        repository="demo/repo",
-        workflow_run_id="1",
-    )
+        console.print("[1/6] Created broken repository (sign bug in add)")
+        console.print("[2/6] Diagnosing failure")
 
-    async def _noop_ctx(s: TriageState) -> None:
-        s.ci_logs = "FAILED test_foo\nAssertionError"
+        llm = _build_demo_llm()
+        recorder = EventRecorder()
+        planner = Planner(llm=llm, recorder=recorder)
+        executor = Executor()
+        orch = Orchestrator(
+            planner=planner,
+            executor=executor,
+            recorder=recorder,
+            budget=Budget(max_iterations=3),
+            workspace_root=str(root),
+        )
 
-    orch = Orchestrator(planner=planner, executor=executor, budget=Budget(max_iterations=1))
-    outcome = asyncio.run(orch.run(state, _noop_ctx))
+        state = TriageState(repository="demo/repo", workflow_run_id="1")
+        recorder.bind(state.triage_id)
 
-    console.print(f"Status: [bold]{outcome.state.status.value}[/bold]")
-    console.print(f"Root cause: {outcome.state.root_cause or '—'}")
-    console.print(f"Stop reason: {outcome.stop_reason}")
+        async def _local_context(s: TriageState) -> None:
+            s.ci_logs = (
+                "Run #1 FAILED\n"
+                "job: test\n"
+                "FAILED src/calc.py::test_add\n"
+                "Traceback (most recent call last)\n"
+                "  src/calc.py:2\n"
+                "AssertionError: assert (2 - 2) == 4\n"
+            )
+
+        console.print("[3/6] Reproducing failure")
+        outcome = asyncio.run(orch.run(state, _local_context))
+        result = outcome.state
+
+        console.print("[4/6] Analyzing root cause + generating patch")
+        console.print("[5/6] Verifying patch")
+
+        console.print("")
+        console.print("──────────────────────────────")
+        console.print(f"Status:     [bold]{result.status.value}[/bold]")
+        console.print(f"Root cause: {result.root_cause or '—'}")
+        console.print(f"Changed:    {', '.join(result.changed_files) or '—'}")
+        total_passed = sum(tr.passed for tr in result.verification.results)
+        console.print(
+            f"Tests:      {total_passed} passed across "
+            f"{len(result.verification.results)} verification run(s)"
+        )
+        console.print("──────────────────────────────")
+        if result.candidate_patch:
+            console.print("[dim]Candidate diff (truncated):[/dim]")
+            console.print(result.candidate_patch[:1200])
+        console.print("")
+        console.print("[6/6] Stopping before any remote write (no PR opened)")
+        console.print("[green]Demo complete.[/green]")
+
+        if result.status.value != "awaiting_approval":
+            console.print(
+                f"[yellow]Demo did not reach approval: {outcome.stop_reason}[/yellow]"
+            )
+            raise typer.Exit(1)
 
 
 @app.command()
