@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from app.agent.cancellation import CancellationToken, CancelledError
 from app.agent.executor import ExecutedCall, Executor
 from app.agent.parser import is_infrastructure
 from app.agent.planner import Planner
@@ -74,6 +75,7 @@ class Orchestrator:
         budget: Budget | None = None,
         workspace_root: str = "",
         sandbox_manager: SandboxManager | None = None,
+        cancel_token: CancellationToken | None = None,
     ) -> None:
         self.planner = planner
         self.executor = executor
@@ -82,6 +84,7 @@ class Orchestrator:
         self.workspace_root = workspace_root
         self._sandbox_manager = sandbox_manager
         self._sandbox_id: str | None = None
+        self.cancel_token = cancel_token
 
     # ------------------------------------------------------------------ #
     # Public entry point
@@ -98,6 +101,7 @@ class Orchestrator:
         metrics.counter("triage_runs").inc()
         metrics.gauge("active_runs").inc()
         try:
+            self._check_cancelled(state)
             # Start sandbox if manager provided (Docker or local backend).
             if self._sandbox_manager is not None:
                 self._sandbox_id = self._sandbox_manager.start(
@@ -133,6 +137,11 @@ class Orchestrator:
 
             outcome = await self._solve(state, start)
             return outcome
+        except CancelledError as exc:
+            state.status = RunStatus.CANCELLED
+            state.final_result = f"Triage cancelled: {exc}"
+            self._emit(state, "cancel", "CANCELLED", decision=str(exc))
+            return TriageOutcome(state, False, "cancelled")
         except Exception as exc:  # noqa: BLE001 - recover into a clear failure state
             state.status = RunStatus.FAILED
             state.last_error = str(exc)
@@ -188,6 +197,7 @@ class Orchestrator:
         for attempt in range(self.budget.max_iterations):
             state.iterations = attempt + 1
             self._guard_budget(state, start)
+            self._check_cancelled(state)
 
             # 1. Pick the file to fix and read it.
             target = self._pick_target_file(state)
@@ -231,6 +241,7 @@ class Orchestrator:
                 state.verification.results, state.changed_files
             )
             self._emit(state, "verify", "VERIFY", decision=decision.verdict)
+            self._check_cancelled(state)
             if decision.verdict == "success" or state.verification.all_critical_pass:
                 await self._prepare_pr(state)
                 return TriageOutcome(state, True, "verified")
@@ -438,6 +449,16 @@ class Orchestrator:
             raise RuntimeError(f"tool-call budget exceeded ({state.tool_calls})")
         if time.monotonic() - start > self.budget.max_execution_seconds:
             raise RuntimeError("execution time budget exceeded")
+
+    def _check_cancelled(self, state: TriageState) -> None:
+        """Cooperatively abort if cancellation has been requested.
+
+        Called at stage / iteration boundaries so a long-running triage unwinds
+        into :class:`RunStatus.CANCELLED` without leaving a partial patch.
+        """
+        if self.cancel_token is None:
+            return
+        self.cancel_token.raise_if_cancelled()
 
     def _emit(self, state: TriageState, step: str, phase: str, decision: str = "") -> None:
         self.recorder.record(

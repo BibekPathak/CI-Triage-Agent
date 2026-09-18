@@ -212,6 +212,29 @@ def resume_triage_endpoint(
     )
 
 
+@router.post("/{triage_id}/cancel", response_model=TriageRunResponse)
+def cancel_triage_endpoint(
+    triage_id: str,
+    repo: Annotated[TriageRepository, Depends(get_repository)],
+    m: Annotated[Metrics, Depends(get_metrics)],
+) -> TriageRunResponse:
+    """Cancel a running (or queued) triage run.
+
+    Cooperatively signals any in-flight background task to stop at its next
+    stage / iteration boundary and immediately persists ``CANCELLED`` status.
+    """
+    from app.api.service import cancel_triage
+
+    if repo.get_state(triage_id) is None:
+        raise HTTPException(status_code=404, detail="Triage run not found")
+    try:
+        state = cancel_triage(triage_id, repo)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    m.counter("api_cancellations").inc()
+    return _state_to_response(state)
+
+
 def _open_pr_wrapper(serialized_state: str) -> None:
     """Reconstruct state and open the fix PR in a fresh DB session.
 

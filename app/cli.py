@@ -160,6 +160,30 @@ def list_runs(
 
 
 @app.command()
+def cancel(triage_id: str = typer.Argument(help="Triage run ID")) -> None:
+    """Cancel a running triage run."""
+    from app.api.service import cancel_triage
+    from app.db import TriageRepository
+    from app.db.engine import create_engine, session_factory
+
+    create_engine()
+    session = session_factory()
+    try:
+        repo = TriageRepository(session)
+        try:
+            state = cancel_triage(triage_id, repo)
+        except RuntimeError as exc:
+            console.print(f"[yellow]{exc}[/yellow]")
+            raise typer.Exit(1) from exc
+        console.print(
+            f"[green]Cancelled[/green] triage {state.triage_id} "
+            f"({state.repository or '—'}): {state.final_result}"
+        )
+    finally:
+        session.close()
+
+
+@app.command()
 def demo() -> None:
     """Run a self-contained demo (no API key / token / internet).
 

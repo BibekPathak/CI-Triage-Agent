@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 
+from app.agent.cancellation import CancellationToken
 from app.agent.executor import Executor
 from app.agent.orchestrator import Budget, Orchestrator
 from app.agent.planner import Planner
@@ -22,12 +23,32 @@ from app.sandbox.manager import SandboxManager
 
 logger = get_logger("service")
 
+#: In-process registry of live triage runs -> their cancellation token, so an
+#: API handler can signal a running background task to stop. Entry is removed
+#: when a run reaches a terminal state.
+_active_tokens: dict[str, CancellationToken] = {}
+
+
+def register_token(triage_id: str, token: CancellationToken) -> None:
+    """Associate a cancellation token with a live run."""
+    _active_tokens[triage_id] = token
+
+
+def unregister_token(triage_id: str) -> None:
+    """Drop the token for a run that has finished (terminal state)."""
+    _active_tokens.pop(triage_id, None)
+
+
+def _get_token(triage_id: str) -> CancellationToken | None:
+    return _active_tokens.get(triage_id)
+
 
 def build_orchestrator(
     recorder: EventRecorder | None = None,
     budget: Budget | None = None,
     workspace_root: str = "",
     sandbox_manager: SandboxManager | None = None,
+    cancel_token: CancellationToken | None = None,
 ) -> Orchestrator:
     """Construct an :class:`Orchestrator` from current settings.
 
@@ -51,6 +72,7 @@ def build_orchestrator(
         budget=budget,
         workspace_root=workspace_root,
         sandbox_manager=sandbox_manager,
+        cancel_token=cancel_token,
     )
 
 
@@ -86,6 +108,43 @@ def resume_triage(
             f"triage run {triage_id} is not resumable "
             f"(status={state.status.value}, patch={'yes' if state.candidate_patch else 'no'})"
         )
+    return state
+
+
+def cancel_triage(
+    triage_id: str,
+    repo: TriageRepository,
+    reason: str = "cancelled by user",
+) -> TriageState:
+    """Request cancellation of a running triage.
+
+    Cooperative: signals any in-flight background run to stop at the next
+    stage / iteration boundary, and persists ``CANCELLED`` status so the run is
+    terminal immediately even if the background task is still unwinding.
+
+    Raises :class:`RuntimeError` with a clear message if the run is already in
+    a terminal state and therefore cannot be cancelled.
+    """
+    from app.models.domain import RunStatus
+
+    state = repo.get_state(triage_id)
+    if state is None:
+        raise RuntimeError(f"triage run not found: {triage_id}")
+
+    if state.status in (RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED):
+        raise RuntimeError(
+            f"triage run {triage_id} cannot be cancelled: already "
+            f"{state.status.value}"
+        )
+
+    token = _get_token(triage_id)
+    if token is not None:
+        token.cancel(reason)
+
+    state.status = RunStatus.CANCELLED
+    state.final_result = f"Triage cancelled: {reason}"
+    repo.save_state(state)
+    repo.commit()
     return state
 
 
@@ -137,6 +196,11 @@ async def run_triage(
         repo.save_state(state)
         repo.commit()
 
+        # Create + register a cancellation token so the run can be aborted via
+        # the API while it executes in the background.
+        token = CancellationToken()
+        register_token(state.triage_id, token)
+
         # Materialize the failing revision into the workspace.  Best-effort:
         # a failed checkout (e.g. offline/private) logs a warning and the run
         # proceeds without a sandbox rather than aborting.
@@ -167,6 +231,7 @@ async def run_triage(
             budget=budget,
             workspace_root=workspace_root,
             sandbox_manager=SandboxManager(backend=backend) if workspace_root else None,
+            cancel_token=token,
         )
 
         outcome = await orchestrator.run(state, context_source)
@@ -203,6 +268,8 @@ async def run_triage(
         else:
             logger.error("triage failed before state was created: %s", exc)
     finally:
+        if state is not None:
+            unregister_token(state.triage_id)
         if workspace is not None:
             workspace.cleanup()
         if owns_session:

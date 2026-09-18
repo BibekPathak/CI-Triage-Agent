@@ -73,6 +73,19 @@ def _seed_state(session, triage_id: str = "test123") -> None:
     session.commit()
 
 
+def _seed_running_state(session, triage_id: str = "run123") -> None:
+    """Seed a run that is currently executing (cancellable)."""
+    state = TriageState(
+        triage_id=triage_id,
+        repository="owner/repo",
+        workflow_run_id="42",
+        status=RunStatus.RUNNING,
+    )
+    from app.db.repository import state_to_row
+    session.add(state_to_row(state))
+    session.commit()
+
+
 def _seed_resumable_state(session, triage_id: str = "abc123") -> None:
     """Seed a run paused at WAITING_APPROVAL with a signed-off patch."""
     state = TriageState(
@@ -218,6 +231,26 @@ class TestApproveTriage:
     def test_approve_not_found(self, client):
         c, _ = client
         resp = c.post("/api/v1/triage/nope/approve", json={"approve": True})
+        assert resp.status_code == 404
+
+
+class TestCancelTriage:
+    def test_cancel_running(self, client, db_session):
+        c, m = client
+        _seed_running_state(db_session, "run123")
+        resp = c.post("/api/v1/triage/run123/cancel")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "cancelled"
+
+    def test_cancel_terminal_conflict(self, client, db_session):
+        c, _ = client
+        _seed_state(db_session, "done123")  # status=COMPLETED
+        resp = c.post("/api/v1/triage/done123/cancel")
+        assert resp.status_code == 409
+
+    def test_cancel_not_found(self, client):
+        c, _ = client
+        resp = c.post("/api/v1/triage/nope/cancel")
         assert resp.status_code == 404
 
 
